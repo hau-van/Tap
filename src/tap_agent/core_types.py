@@ -1,91 +1,114 @@
-"""Core provider-neutral types cho tap_agent.
 
-Không import gì ngoài stdlib + pydantic. Không biết OpenAI/Gemini/filesystem là gì.
-Mọi layer khác của agent (provider, loop, tools, cli) đều import từ đây.
-"""
 from __future__ import annotations
-
+import uuid
 from datetime import datetime, timezone
-from typing import Literal, Union
-
+from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field
+
+# ---------------------------------------------------------------------------
+# Helpers & Type Aliases
+# ---------------------------------------------------------------------------
+Role = Literal["user", "assistant", "tool"]
+EventType = Literal["message", "tool_call", "tool_result", "error", "done"]
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# ─── Tool primitives ─────────────────────────────────────────
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+# ---------------------------------------------------------------------------
+# Tool Primitives
+# ---------------------------------------------------------------------------
+class ToolDefinition(BaseModel):
+    """Schema của một tool được expose cho LLM.
+    
+    Chỉ chứa metadata mà LLM cần biết. Việc wrap schema này thành format
+    của OpenAI hay Gemini sẽ do layer Provider đảm nhiệm.
+    """
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    description: str
+    parameters_schema: dict[str, Any]
+
 
 class ToolCall(BaseModel):
-    """Assistant's request to invoke a tool.
+    """Yêu cầu gọi tool từ LLM (Assistant turn)."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    Được LLM sinh ra trong assistant turn. Loop sẽ tra `name` trong tool
-    registry, execute với `arguments`, rồi tạo ToolResult tương ứng.
-    """
-    model_config = ConfigDict(frozen=True)
-
-    id: str
+    # Mặc định tự sinh ID, nhưng cho phép provider ghi đè (vd: OpenAI trả về call_id)
+    id: str = Field(default_factory=lambda: _new_id("call"))
     name: str
-    arguments: dict
+    arguments: dict[str, Any]
 
 
 class ToolResult(BaseModel):
-    """Kết quả sau khi execute một ToolCall.
-
-    Ghép cặp với ToolCall qua `tool_call_id`. `success=False` KHÔNG raise
-    exception ra ngoài loop — nó là dữ liệu bình thường để LLM đọc và tự sửa.
-    """
-    model_config = ConfigDict(frozen=True)
+    """Kết quả thực thi của một ToolCall."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool_call_id: str
     success: bool
     output: str
-    error: str | None = None
+    error: Optional[str] = None
+
+    @classmethod
+    def ok(cls, tool_call_id: str, output: str) -> "ToolResult":
+        return cls(tool_call_id=tool_call_id, success=True, output=output)
+
+    @classmethod
+    def fail(cls, tool_call_id: str, error: str) -> "ToolResult":
+        return cls(tool_call_id=tool_call_id, success=False, output="", error=error)
 
 
-class ToolDefinition(BaseModel):
-    """Schema của một tool được expose cho LLM.
-
-    Chỉ chứa metadata mà LLM cần biết để quyết định gọi tool. Không chứa
-    executor — implementation nằm ở layer khác.
-    """
-    model_config = ConfigDict(frozen=True)
-
-    name: str
-    description: str
-    parameters_schema: dict   # JSON Schema draft-07, dùng cho function calling
-
-
-# ─── Message ─────────────────────────────────────────────────
-
+# ---------------------------------------------------------------------------
+# Message
+# ---------------------------------------------------------------------------
 class Message(BaseModel):
-    """Một message trong transcript conversation.
-
-    Dùng chung cho user / assistant / tool. `tool_calls` chỉ có ở
-    role="assistant"; role="tool" thì `content` chứa tool output đã stringify.
+    """Một message chuẩn trong transcript conversation.
+    
+    Thiết kế dạng "Flat": nếu role="tool", kết quả trả về chỉ là string 
+    được lưu thẳng vào `content`. Cấu trúc này dễ serialize và tương thích tự 
+    nhiên với mọi LLM Provider.
     """
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    role: Literal["user", "assistant", "tool"]
+    id: str = Field(default_factory=lambda: _new_id("msg"))
+    role: Role
     content: str
-    tool_calls: list[ToolCall] | None = None
+    tool_calls: Optional[list[ToolCall]] = None
     timestamp: datetime = Field(default_factory=_utc_now)
 
 
-# ─── Agent event ─────────────────────────────────────────────
-
+# ---------------------------------------------------------------------------
+# Agent Event Stream
+# ---------------------------------------------------------------------------
 class AgentEvent(BaseModel):
-    """Sự kiện do agent runtime emit ra event stream.
+    """Sự kiện do agent runtime emit ra (Pub/Sub pattern)."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    - type="message":     payload là Message vừa được append vào transcript
-    - type="tool_call":   payload là ToolCall LLM vừa yêu cầu
-    - type="tool_result": payload là ToolResult vừa execute xong
-    - type="error":       payload là str mô tả lỗi
-    - type="done":        payload là str (có thể rỗng), báo agent kết thúc run
-    """
-    model_config = ConfigDict(frozen=True)
+    type: EventType
+    payload: Union[Message, ToolCall, ToolResult, str, None] = None
 
-    type: Literal["message", "tool_call", "tool_result", "error", "done"]
-    payload: Union[Message, ToolCall, ToolResult, str]
-    
+    @classmethod
+    def message(cls, msg: Message) -> "AgentEvent":
+        return cls(type="message", payload=msg)
+
+    @classmethod
+    def tool_call(cls, call: ToolCall) -> "AgentEvent":
+        return cls(type="tool_call", payload=call)
+
+    @classmethod
+    def tool_result(cls, result: ToolResult) -> "AgentEvent":
+        return cls(type="tool_result", payload=result)
+
+    @classmethod
+    def error(cls, message: str) -> "AgentEvent":
+        return cls(type="error", payload=message)
+
+    @classmethod
+    def done(cls) -> "AgentEvent":
+        return cls(type="done", payload=None)
