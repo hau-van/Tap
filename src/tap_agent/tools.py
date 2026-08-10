@@ -315,13 +315,9 @@ async def main():
 # ---------------------------------------------------------------------------
 # Dispatch table & public execute_tool()
 # ---------------------------------------------------------------------------
-def _run_bash(arguments: dict[str, Any]) -> str:
-    """Bridge from sync execute_tool to async _bash_tool."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_bash_tool(arguments))
-    finally:
-        loop.close()
+def _run_bash(arguments: dict[str, Any]) -> Awaitable[str]:
+    """Bridge to async _bash_tool."""
+    return _bash_tool(arguments)
 
 
 _HANDLERS: dict[str, Any] = {
@@ -330,7 +326,7 @@ _HANDLERS: dict[str, Any] = {
 }
 
 
-def execute_tool(tool_call: ToolCall) -> ToolResult:
+async def execute_tool(tool_call: ToolCall) -> ToolResult:
     """Dispatch *tool_call* to the matching handler and always return a ToolResult."""
     call_id = tool_call.id
 
@@ -339,8 +335,12 @@ def execute_tool(tool_call: ToolCall) -> ToolResult:
         return ToolResult.fail(call_id, f"unknown tool: '{tool_call.name}'.")
 
     try:
-        output: str = handler(tool_call.arguments)
-        return ToolResult.ok(call_id, output)
+        output_or_coro = handler(tool_call.arguments)
+        if asyncio.iscoroutine(output_or_coro):
+            output = await output_or_coro
+        else:
+            output = output_or_coro
+        return ToolResult.ok(call_id, str(output))
 
     except ToolExecutionError as exc:
         return ToolResult.fail(call_id, str(exc))

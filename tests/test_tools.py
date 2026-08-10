@@ -65,14 +65,15 @@ class TestReadTool:
     # ----------------------------------------------------------
     # Test 1: Read entire file successfully
     # ----------------------------------------------------------
-    def test_read_entire_file(self, tmp_project: Path):
+    @pytest.mark.asyncio
+    async def test_read_entire_file(self, tmp_project: Path):
         """ToolResult.ok with full file content."""
         target = tmp_project / "hello.txt"
         target.write_text("line1\nline2\nline3\n", encoding="utf-8")
 
         # Pass path relative to PROJECT_ROOT
         rel = target.relative_to(tools_mod.PROJECT_ROOT)
-        result = execute_tool(_make_call("read", path=str(rel)))
+        result = await execute_tool(_make_call("read", path=str(rel)))
 
         assert isinstance(result, ToolResult)
         assert result.success is True
@@ -83,13 +84,14 @@ class TestReadTool:
     # ----------------------------------------------------------
     # Test 2: Read with start_line / end_line
     # ----------------------------------------------------------
-    def test_read_line_slice(self, tmp_project: Path):
+    @pytest.mark.asyncio
+    async def test_read_line_slice(self, tmp_project: Path):
         """Only lines in [start_line, end_line] are returned."""
         target = tmp_project / "numbered.txt"
         target.write_text("\n".join(f"line{i}" for i in range(1, 11)), encoding="utf-8")
 
         rel = target.relative_to(tools_mod.PROJECT_ROOT)
-        result = execute_tool(_make_call("read", path=str(rel), start_line=3, end_line=5))
+        result = await execute_tool(_make_call("read", path=str(rel), start_line=3, end_line=5))
 
         assert result.success is True
         assert "line3" in result.output
@@ -101,7 +103,8 @@ class TestReadTool:
     # ----------------------------------------------------------
     # Test 3: Truncation when file exceeds MAX_READ_LINES
     # ----------------------------------------------------------
-    def test_read_truncates_long_file(self, tmp_project: Path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_read_truncates_long_file(self, tmp_project: Path, monkeypatch):
         """Output is capped at MAX_READ_LINES; truncation note is appended."""
         monkeypatch.setattr(tools_mod, "MAX_READ_LINES", 5)
 
@@ -109,7 +112,7 @@ class TestReadTool:
         target.write_text("\n".join(f"row{i}" for i in range(1, 21)), encoding="utf-8")
 
         rel = target.relative_to(tools_mod.PROJECT_ROOT)
-        result = execute_tool(_make_call("read", path=str(rel)))
+        result = await execute_tool(_make_call("read", path=str(rel)))
 
         assert result.success is True
         assert "row5" in result.output
@@ -119,10 +122,11 @@ class TestReadTool:
     # ----------------------------------------------------------
     # Test 4: Non-existent file → ToolResult.fail
     # ----------------------------------------------------------
-    def test_read_nonexistent_file(self, tmp_project: Path):
+    @pytest.mark.asyncio
+    async def test_read_nonexistent_file(self, tmp_project: Path):
         """Missing file produces ToolResult.fail (no exception raised)."""
         rel = tmp_project.relative_to(tools_mod.PROJECT_ROOT) / "ghost.txt"
-        result = execute_tool(_make_call("read", path=str(rel)))
+        result = await execute_tool(_make_call("read", path=str(rel)))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -132,9 +136,10 @@ class TestReadTool:
     # ----------------------------------------------------------
     # Test 5: Path traversal → ToolResult.fail
     # ----------------------------------------------------------
-    def test_read_path_traversal_blocked(self):
+    @pytest.mark.asyncio
+    async def test_read_path_traversal_blocked(self):
         """Path outside PROJECT_ROOT is denied without raising."""
-        result = execute_tool(_make_call("read", path="../../etc/passwd"))
+        result = await execute_tool(_make_call("read", path="../../etc/passwd"))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -144,13 +149,14 @@ class TestReadTool:
     # ----------------------------------------------------------
     # Test 6: Binary file → ToolResult.fail
     # ----------------------------------------------------------
-    def test_read_binary_file_refused(self, tmp_project: Path):
+    @pytest.mark.asyncio
+    async def test_read_binary_file_refused(self, tmp_project: Path):
         """Binary content triggers UnicodeDecodeError → ToolResult.fail."""
         target = tmp_project / "data.bin"
         target.write_bytes(bytes(range(256)))  # 256 bytes, definitely not UTF-8
 
         rel = target.relative_to(tools_mod.PROJECT_ROOT)
-        result = execute_tool(_make_call("read", path=str(rel)))
+        result = await execute_tool(_make_call("read", path=str(rel)))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -160,9 +166,10 @@ class TestReadTool:
     # ----------------------------------------------------------
     # Test 7: Missing 'path' argument → ToolResult.fail
     # ----------------------------------------------------------
-    def test_read_missing_path_argument(self):
+    @pytest.mark.asyncio
+    async def test_read_missing_path_argument(self):
         """ToolCall without 'path' key → ToolResult.fail (not an exception)."""
-        result = execute_tool(_make_call("read"))  # no path kwarg
+        result = await execute_tool(_make_call("read"))  # no path kwarg
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -179,14 +186,15 @@ class TestBashTool:
     # ----------------------------------------------------------
     # Test 8: Basic echo command succeeds
     # ----------------------------------------------------------
-    def test_bash_echo_succeeds(self):
+    @pytest.mark.asyncio
+    async def test_bash_echo_succeeds(self):
         """Simple echo → ToolResult.ok with output."""
         if os.name == "nt":
             cmd = "echo hello_world"
         else:
             cmd = "echo hello_world"
 
-        result = execute_tool(_make_call("bash", command=cmd))
+        result = await execute_tool(_make_call("bash", command=cmd))
 
         assert isinstance(result, ToolResult)
         assert result.success is True
@@ -195,18 +203,20 @@ class TestBashTool:
     # ----------------------------------------------------------
     # Test 9: Dangerous command is blocked
     # ----------------------------------------------------------
-    def test_bash_dangerous_command_blocked(self):
+    @pytest.mark.asyncio
+    async def test_bash_dangerous_command_blocked(self):
         """rm -rf / is blocked before any subprocess is created."""
-        result = execute_tool(_make_call("bash", command="rm -rf /"))
+        result = await execute_tool(_make_call("bash", command="rm -rf /"))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
         assert result.error is not None
         assert "blocked" in result.error.lower() or "dangerous" in result.error.lower()
 
-    def test_bash_windows_dangerous_command_blocked(self):
+    @pytest.mark.asyncio
+    async def test_bash_windows_dangerous_command_blocked(self):
         """del / is blocked (Windows blacklist applies on all platforms)."""
-        result = execute_tool(_make_call("bash", command="del / some_path"))
+        result = await execute_tool(_make_call("bash", command="del / some_path"))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -215,7 +225,8 @@ class TestBashTool:
     # ----------------------------------------------------------
     # Test 10: Failed command (exit code != 0) → ToolResult.fail
     # ----------------------------------------------------------
-    def test_bash_nonzero_exit_code(self):
+    @pytest.mark.asyncio
+    async def test_bash_nonzero_exit_code(self):
         """A command that exits non-zero → ToolResult.fail with stderr/stdout."""
         if os.name == "nt":
             # 'dir' on a path that doesn't exist exits non-zero on Windows
@@ -223,7 +234,7 @@ class TestBashTool:
         else:
             cmd = "ls /this_path_does_not_exist_xyz_abc_123"
 
-        result = execute_tool(_make_call("bash", command=cmd))
+        result = await execute_tool(_make_call("bash", command=cmd))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -232,7 +243,8 @@ class TestBashTool:
     # ----------------------------------------------------------
     # Test 11: Real timeout – process is killed within BASH_TIMEOUT_SECONDS
     # ----------------------------------------------------------
-    def test_bash_timeout_kills_process(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_bash_timeout_kills_process(self, monkeypatch):
         """
         Monkeypatch BASH_TIMEOUT_SECONDS to 0.2 s and run a long-running
         command.  The result must be ToolResult.fail mentioning timeout,
@@ -247,7 +259,7 @@ class TestBashTool:
         else:
             cmd = "sleep 5"
 
-        result = execute_tool(_make_call("bash", command=cmd))
+        result = await execute_tool(_make_call("bash", command=cmd))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -257,9 +269,10 @@ class TestBashTool:
     # ----------------------------------------------------------
     # Test 12: Missing 'command' argument → ToolResult.fail
     # ----------------------------------------------------------
-    def test_bash_missing_command_argument(self):
+    @pytest.mark.asyncio
+    async def test_bash_missing_command_argument(self):
         """ToolCall without 'command' key → ToolResult.fail (not an exception)."""
-        result = execute_tool(_make_call("bash"))  # no command kwarg
+        result = await execute_tool(_make_call("bash"))  # no command kwarg
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -276,9 +289,10 @@ class TestExecuteTool:
     # ----------------------------------------------------------
     # Test 13: Unknown tool name → ToolResult.fail, no exception
     # ----------------------------------------------------------
-    def test_unknown_tool_returns_fail(self):
+    @pytest.mark.asyncio
+    async def test_unknown_tool_returns_fail(self):
         """execute_tool with an unknown name returns ToolResult.fail."""
-        result = execute_tool(_make_call("nonexistent_tool_xyz"))
+        result = await execute_tool(_make_call("nonexistent_tool_xyz"))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
@@ -288,7 +302,8 @@ class TestExecuteTool:
     # ----------------------------------------------------------
     # Test 14: execute_tool never raises – even with a broken handler
     # ----------------------------------------------------------
-    def test_execute_tool_never_raises(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_execute_tool_never_raises(self, monkeypatch):
         """Even if a handler throws an unexpected exception, execute_tool
         swallows it and returns ToolResult.fail."""
 
@@ -297,7 +312,7 @@ class TestExecuteTool:
 
         monkeypatch.setitem(tools_mod._HANDLERS, "read", _exploding_handler)
 
-        result = execute_tool(_make_call("read", path="anything.py"))
+        result = await execute_tool(_make_call("read", path="anything.py"))
 
         assert isinstance(result, ToolResult)
         assert result.success is False
