@@ -87,7 +87,6 @@ class Message(BaseModel):
 # Agent Event Stream
 # ---------------------------------------------------------------------------
 class AgentEvent(BaseModel):
-    """Sự kiện do agent runtime emit ra (Pub/Sub pattern)."""
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: EventType
