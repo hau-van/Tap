@@ -19,11 +19,3 @@ packages = ["src/tap_agent"]
 dev = [
     "pytest>=9.1.1",
 ]
-
-[tool.pytest.ini_options]
-# Suppress Windows asyncio ResourceWarning that fires when a subprocess pipe
-# transport is garbage-collected after its event loop is already closed.
-# This is a known CPython/Windows issue and does NOT indicate a test failure.
-filterwarnings = [
-    "ignore::pytest.PytestUnraisableExceptionWarning",
-]
