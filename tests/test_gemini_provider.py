@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from google.genai import types
+from google.genai import errors, types
 
 from tap_agent.core_types import Message, ToolDefinition
 from tap_agent.gemini_provider import (
 	GeminiProvider,
+	GeminiProviderError,
+	RateLimiter,
 	_messages_to_contents,
 	_to_gemini_schema,
 )
@@ -132,3 +136,106 @@ class TestGeminiProvider:
 		assert client.models.calls[0]["model"] == "gemini-test"
 		assert len(client.models.calls[0]["contents"]) == 1
 		assert len(client.models.calls[0]["config"].tools) == 1
+
+	@pytest.mark.asyncio
+	async def test_rate_limiter_wait(self):
+		limiter = RateLimiter(requests_per_minute=600)  # 10 req/sec => 0.1s interval
+
+		start_time = time.monotonic()
+		await limiter.wait()  # first call should not wait
+		await limiter.wait()  # second call should wait ~0.1s
+		end_time = time.monotonic()
+
+		elapsed = end_time - start_time
+		assert elapsed >= 0.09, f"RateLimiter didn't wait long enough: {elapsed}"
+
+	@pytest.mark.asyncio
+	async def test_backoff_retry_success(self):
+		mock_client = MagicMock()
+		mock_client.aio.models.generate_content = AsyncMock()
+
+		error_429 = errors.ClientError(
+			429,
+			{"error": {"code": 429, "message": "Too Many Requests", "status": "RESOURCE_EXHAUSTED"}},
+			None,
+		)
+
+		success_response = types.GenerateContentResponse(
+			candidates=[types.Candidate(content=types.Content(parts=[types.Part(text="Success!")]))]
+		)
+
+		mock_client.aio.models.generate_content.side_effect = [
+			error_429,
+			error_429,
+			success_response,
+		]
+
+		provider = GeminiProvider(
+			model="test-model",
+			client=mock_client,
+			requests_per_minute=0,  # disable rate limiter for faster tests
+			max_retries=3,
+		)
+
+		start_time = time.monotonic()
+		response = await provider.generate_reply([Message(role="user", content="Hi")], [])
+		end_time = time.monotonic()
+
+		assert response.content == "Success!"
+		assert mock_client.aio.models.generate_content.call_count == 3
+		assert end_time - start_time >= 2.0  # ~1s + ~2s
+
+	@pytest.mark.asyncio
+	async def test_backoff_retry_exceeds_max_retries(self):
+		mock_client = MagicMock()
+		mock_client.aio.models.generate_content = AsyncMock()
+
+		error_429 = errors.ClientError(
+			429,
+			{"error": {"code": 429, "message": "Too Many Requests", "status": "RESOURCE_EXHAUSTED"}},
+			None,
+		)
+
+		mock_client.aio.models.generate_content.side_effect = error_429
+
+		provider = GeminiProvider(
+			model="test-model",
+			client=mock_client,
+			requests_per_minute=0,
+			max_retries=2,
+		)
+
+		start_time = time.monotonic()
+		with pytest.raises(GeminiProviderError) as exc_info:
+			await provider.generate_reply([Message(role="user", content="Hi")], [])
+		end_time = time.monotonic()
+
+		assert mock_client.aio.models.generate_content.call_count == 3  # 1 initial + 2 retries
+		assert "Gemini request failed" in str(exc_info.value)
+		assert end_time - start_time >= 2.0
+
+	@pytest.mark.asyncio
+	async def test_fails_fast_on_non_429_error(self):
+		mock_client = MagicMock()
+		mock_client.aio.models.generate_content = AsyncMock()
+
+		error_400 = errors.ClientError(
+			400,
+			{"error": {"code": 400, "message": "Bad Request", "status": "INVALID_ARGUMENT"}},
+			None,
+		)
+
+		mock_client.aio.models.generate_content.side_effect = error_400
+
+		provider = GeminiProvider(
+			model="test-model",
+			client=mock_client,
+			requests_per_minute=0,
+			max_retries=5,
+		)
+
+		with pytest.raises(GeminiProviderError) as exc_info:
+			await provider.generate_reply([Message(role="user", content="Hi")], [])
+
+		assert mock_client.aio.models.generate_content.call_count == 1
+		assert "Gemini request failed" in str(exc_info.value)

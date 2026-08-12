@@ -28,7 +28,8 @@ async def main():
     # Khởi tạo Gemini model
     provider = GeminiProvider(
         model="gemini-2.5-flash", # Hoặc model bạn muốn dùng
-        api_key=os.environ.get("GEMINI_API_KEY") 
+        api_key=os.environ.get("GEMINI_API_KEY"),
+        system_instruction="Nếu cần đọc nhiều file, hãy gọi tool `read` nhiều lần trong cùng một lượt trả lời thay vì đọc từng file một rồi chờ kết quả."
     )
     
     # Gom các thành phần lại vào Harness

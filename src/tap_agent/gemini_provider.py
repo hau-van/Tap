@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import random
+import time
 from typing import Any
 
 from google.genai import Client, errors, types
@@ -14,7 +17,16 @@ class GeminiProviderError(RuntimeError):
 
 
 def _to_gemini_schema(tool: ToolDefinition) -> dict[str, Any]:
-	return tool.parameters_schema
+	def normalize(schema: dict[str, Any]) -> dict[str, Any]:
+		res = schema.copy()
+		if "type" in res and isinstance(res["type"], str):
+			res["type"] = res["type"].upper()
+		if "properties" in res:
+			res["properties"] = {k: normalize(v) for k, v in res["properties"].items()}
+		if "items" in res:
+			res["items"] = normalize(res["items"])
+		return res
+	return normalize(tool.parameters_schema)
 
 
 def _tool_to_gemini_function(tool: ToolDefinition) -> types.FunctionDeclaration:
@@ -99,6 +111,23 @@ def _response_to_message(response: types.GenerateContentResponse) -> Message:
 	)
 
 
+class RateLimiter:
+	def __init__(self, requests_per_minute: float) -> None:
+		self._min_interval = 60.0 / requests_per_minute if requests_per_minute > 0 else 0
+		self._lock = asyncio.Lock()
+		self._last_call: float = 0.0
+
+	async def wait(self) -> None:
+		if self._min_interval <= 0:
+			return
+		async with self._lock:
+			now = time.monotonic()
+			elapsed = now - self._last_call
+			if elapsed < self._min_interval:
+				await asyncio.sleep(self._min_interval - elapsed)
+			self._last_call = time.monotonic()
+
+
 class GeminiProvider(ModelProvider):
 	def __init__(
 		self,
@@ -106,8 +135,14 @@ class GeminiProvider(ModelProvider):
 		model: str,
 		api_key: str | None = None,
 		client: Any | None = None,
+		requests_per_minute: float = 10.0,
+		max_retries: int = 5,
+		system_instruction: str | None = None,
 	) -> None:
 		self._model = model
+		self._max_retries = max_retries
+		self._system_instruction = system_instruction
+		self._rate_limiter = RateLimiter(requests_per_minute)
 		if client is not None:
 			self._client = client
 		elif api_key is not None:
@@ -121,21 +156,38 @@ class GeminiProvider(ModelProvider):
 		tools: list[ToolDefinition],
 	) -> Message:
 		gemini_tools = _tools_to_gemini_tools(tools)
-		config = types.GenerateContentConfig(tools=gemini_tools or None)
+		config_kwargs: dict[str, Any] = {}
+		if gemini_tools:
+			config_kwargs["tools"] = gemini_tools
+		if self._system_instruction:
+			config_kwargs["system_instruction"] = self._system_instruction
+			
+		config = types.GenerateContentConfig(**config_kwargs)
 
-		try:
-			response = await self._client.aio.models.generate_content(
-				model=self._model,
-				contents=_messages_to_contents(messages),
-				config=config,
-			)
-		except (
-			errors.APIError,
-			errors.ClientError,
-			errors.ServerError,
-			errors.UnknownApiResponseError,
-			TimeoutError,
-		) as exc:
-			raise GeminiProviderError(f"Gemini request failed: {exc}") from exc
-
-		return _response_to_message(response)
+		for attempt in range(1, self._max_retries + 2):
+			await self._rate_limiter.wait()
+			try:
+				response = await self._client.aio.models.generate_content(
+					model=self._model,
+					contents=_messages_to_contents(messages),
+					config=config,
+				)
+				return _response_to_message(response)
+			except (
+				errors.APIError,
+				errors.ClientError,
+				errors.ServerError,
+				errors.UnknownApiResponseError,
+				TimeoutError,
+			) as exc:
+				is_rate_limit = isinstance(exc, errors.APIError) and exc.code == 429
+				if is_rate_limit and attempt <= self._max_retries:
+					# Exponential backoff: 1s, 2s, 4s, 8s, 16s + jitter
+					delay = (2 ** (attempt - 1)) + random.uniform(0.1, 0.5)
+					await asyncio.sleep(delay)
+					continue
+				
+				raise GeminiProviderError(f"Gemini request failed: {exc}") from exc
+		
+		# Unreachable, added for type checker completeness
+		raise GeminiProviderError("Max retries exceeded")
