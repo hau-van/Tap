@@ -100,7 +100,11 @@ Located in `tools.py`, the Agent currently has two primary tools:
    - Reads file contents securely within the boundaries of `PROJECT_ROOT`.
    - Blocks directory traversal attacks (path escape).
    - Supports `start_line` and `end_line` slicing, and enforces a maximum line limit (`MAX_READ_LINES`) to protect the Context Window.
-2. **`bash` (Execute shell)**:
+2. **`write` (Write file)**:
+   - Writes content to files securely within `PROJECT_ROOT`.
+   - Supports both `overwrite` and `append` modes, and automatically creates missing parent directories.
+   - Blocks directory traversal attacks and enforces a maximum size limit (`MAX_WRITE_SIZE`) to protect system stability.
+3. **`bash` (Execute shell)**:
    - Runs shell commands asynchronously. On Windows, it intelligently locates Git Bash's `bash.exe` (to avoid Unix script compatibility issues), falling back to PowerShell if unavailable.
    - **Safety**: Automatically blocks destructive commands using static string matching (e.g., `rm -rf`, `format`, `shutdown`, `del /`, etc.).
    - Enforces a strict timeout (default 30s) by automatically killing the entire process tree.
