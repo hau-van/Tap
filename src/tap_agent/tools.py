@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable
 
 from tap_agent.core_types import ToolCall, ToolDefinition, ToolResult
 
@@ -45,6 +45,66 @@ READ_TOOL_DEFINITION = ToolDefinition(
     },
 )
 
+WRITE_TOOL_DEFINITION = ToolDefinition(
+    name="write",
+    description=(
+        "Write content to a file inside the project directory. "
+        "Overwrites the target file if it already exists. "
+        "Use with caution."
+    ),
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the file, relative to the project root.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Content to write to the file.",
+            },
+        },
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    },
+)
+
+EDIT_TOOL_DEFINITION = ToolDefinition(
+    name="edit",
+    description=(
+        "Edit a file inside the project directory. "
+        "Applies one or more line-range replacements to an existing file. "
+        "Use with caution."
+    ),
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the file, relative to the project root.",
+            },
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "start_line": {"type": "integer"},
+                        "end_line": {"type": "integer"},
+                        "new_content": {"type": "string"},
+                    },
+                    "required": ["start_line", "end_line", "new_content"],
+                },
+                "description": (
+                    "List of edits to apply. Each edit specifies a range of lines "
+                    "(1-based, inclusive) to replace with new content."
+                ),
+            },
+        },
+        "required": ["path", "edits"],
+        "additionalProperties": False,
+    },
+)
+
 BASH_TOOL_DEFINITION = ToolDefinition(
     name="bash",
     description=(
@@ -66,7 +126,7 @@ BASH_TOOL_DEFINITION = ToolDefinition(
     },
 )
 
-AVAILABLE_TOOLS: list[ToolDefinition] = [READ_TOOL_DEFINITION, BASH_TOOL_DEFINITION]
+AVAILABLE_TOOLS: list[ToolDefinition] = [READ_TOOL_DEFINITION, WRITE_TOOL_DEFINITION,EDIT_TOOL_DEFINITION ,BASH_TOOL_DEFINITION]
 
 
 class ToolExecutionError(RuntimeError):
@@ -200,6 +260,73 @@ def _read_tool(arguments: dict[str, Any]) -> str:
 
     return content
 
+async def _write_tool(arguments: dict[str, Any]) -> str:
+    """Synchronous file writer."""
+    raw_path: str | None = arguments.get("path")
+    content: str | None = arguments.get("content")
+
+    if not raw_path:
+        raise ToolExecutionError("Missing required argument: 'path'.")
+    if content is None:
+        raise ToolExecutionError("Missing required argument: 'content'.")
+
+    resolved = _resolve_within_project(raw_path)
+
+    try:
+        resolved.write_text(content, encoding="utf-8")
+    except Exception as e:
+        raise ToolExecutionError(f"Failed to write to '{raw_path}': {e}")
+
+    return f"Successfully wrote to '{raw_path}'."
+
+async def _edit_tool(arguments: dict[str, Any]) -> str:
+    """Synchronous file editor."""
+    raw_path: str | None = arguments.get("path")
+    edits: list[dict[str, Any]] | None = arguments.get("edits")
+
+    if not raw_path:
+        raise ToolExecutionError("Missing required argument: 'path'.")
+    if edits is None:
+        raise ToolExecutionError("Missing required argument: 'edits'.")
+
+    resolved = _resolve_within_project(raw_path)
+
+    if not resolved.exists():
+        raise ToolExecutionError(f"File not found: '{raw_path}'.")
+    if not resolved.is_file():
+        raise ToolExecutionError(f"Path is not a file: '{raw_path}'.")
+
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise ToolExecutionError(
+            f"Cannot read '{raw_path}': binary file detected. Only UTF-8 text files are supported."
+        )
+
+    lines = text.splitlines(keepends=True)
+    total_lines = len(lines)
+
+    for edit in edits:
+        start_line = int(edit.get("start_line", 1))
+        end_line = int(edit.get("end_line", total_lines))
+        new_content = edit.get("new_content", "")
+
+        start_line = max(1, start_line)
+        end_line = min(total_lines, end_line)
+
+        if start_line > end_line:
+            continue
+
+        lines[start_line - 1 : end_line] = [new_content]
+
+    new_text = "".join(lines)
+
+    try:
+        resolved.write_text(new_text, encoding="utf-8")
+    except Exception as e:
+        raise ToolExecutionError(f"Failed to write to '{raw_path}': {e}")
+
+    return f"Successfully edited '{raw_path}'."
 
 async def _bash_tool(arguments: dict[str, Any]) -> str:
     """Async shell executor đa nền tảng.
@@ -322,6 +449,8 @@ def _run_bash(arguments: dict[str, Any]) -> Awaitable[str]:
 
 _HANDLERS: dict[str, Any] = {
     "read": _read_tool,
+    "write": _write_tool,
+    "edit": _edit_tool,
     "bash": _run_bash,
 }
 

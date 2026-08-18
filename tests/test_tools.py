@@ -281,6 +281,143 @@ class TestBashTool:
 
 
 # ============================================================
+# WRITE TOOL TESTS
+# ============================================================
+
+
+class TestWriteTool:
+    @pytest.mark.asyncio
+    async def test_write_creates_or_overwrites_file(self, tmp_project: Path):
+        """write tool should create a file and return success."""
+        target = tmp_project / "written.txt"
+        rel = target.relative_to(tools_mod.PROJECT_ROOT)
+
+        result = await execute_tool(
+            _make_call("write", path=str(rel), content="hello from write")
+        )
+
+        assert isinstance(result, ToolResult)
+        assert result.success is True
+        assert target.read_text(encoding="utf-8") == "hello from write"
+
+    @pytest.mark.asyncio
+    async def test_write_missing_content_argument(self, tmp_project: Path):
+        """Missing content must return ToolResult.fail."""
+        target = tmp_project / "missing-content.txt"
+        rel = target.relative_to(tools_mod.PROJECT_ROOT)
+
+        result = await execute_tool(_make_call("write", path=str(rel)))
+
+        assert isinstance(result, ToolResult)
+        assert result.success is False
+        assert result.error is not None
+        assert "content" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_write_path_traversal_blocked(self):
+        """write must reject paths outside project root."""
+        result = await execute_tool(
+            _make_call("write", path="../../outside.txt", content="x")
+        )
+
+        assert isinstance(result, ToolResult)
+        assert result.success is False
+        assert result.error is not None
+        assert "traversal" in result.error.lower() or "denied" in result.error.lower()
+
+
+# ============================================================
+# EDIT TOOL TESTS
+# ============================================================
+
+
+class TestEditTool:
+    @pytest.mark.asyncio
+    async def test_edit_replaces_line_range(self, tmp_project: Path):
+        """edit should replace a line range with new content."""
+        target = tmp_project / "edit-target.txt"
+        target.write_text("line1\nline2\nline3\n", encoding="utf-8")
+        rel = target.relative_to(tools_mod.PROJECT_ROOT)
+
+        result = await execute_tool(
+            _make_call(
+                "edit",
+                path=str(rel),
+                edits=[
+                    {
+                        "start_line": 2,
+                        "end_line": 2,
+                        "new_content": "replaced\n",
+                    }
+                ],
+            )
+        )
+
+        assert isinstance(result, ToolResult)
+        assert result.success is True
+        assert target.read_text(encoding="utf-8") == "line1\nreplaced\nline3\n"
+
+    @pytest.mark.asyncio
+    async def test_edit_nonexistent_file_returns_fail(self, tmp_project: Path):
+        """edit should fail when file does not exist."""
+        rel = (tmp_project / "ghost-edit.txt").relative_to(tools_mod.PROJECT_ROOT)
+        result = await execute_tool(
+            _make_call(
+                "edit",
+                path=str(rel),
+                edits=[
+                    {
+                        "start_line": 1,
+                        "end_line": 1,
+                        "new_content": "x",
+                    }
+                ],
+            )
+        )
+
+        assert isinstance(result, ToolResult)
+        assert result.success is False
+        assert result.error is not None
+        assert "not found" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_edit_missing_edits_argument(self, tmp_project: Path):
+        """Missing edits list must return ToolResult.fail."""
+        target = tmp_project / "edit-missing-edits.txt"
+        target.write_text("line\n", encoding="utf-8")
+        rel = target.relative_to(tools_mod.PROJECT_ROOT)
+
+        result = await execute_tool(_make_call("edit", path=str(rel)))
+
+        assert isinstance(result, ToolResult)
+        assert result.success is False
+        assert result.error is not None
+        assert "edits" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_edit_path_traversal_blocked(self):
+        """edit must reject paths outside project root."""
+        result = await execute_tool(
+            _make_call(
+                "edit",
+                path="../../outside.txt",
+                edits=[
+                    {
+                        "start_line": 1,
+                        "end_line": 1,
+                        "new_content": "x",
+                    }
+                ],
+            )
+        )
+
+        assert isinstance(result, ToolResult)
+        assert result.success is False
+        assert result.error is not None
+        assert "traversal" in result.error.lower() or "denied" in result.error.lower()
+
+
+# ============================================================
 # EXECUTE_TOOL DISPATCHER TESTS
 # ============================================================
 
@@ -327,9 +464,9 @@ class TestExecuteTool:
 
 class TestAvailableTools:
     def test_available_tools_contains_both(self):
-        """AVAILABLE_TOOLS exports exactly read and bash."""
+        """AVAILABLE_TOOLS exports read, write, edit, and bash."""
         names = {t.name for t in AVAILABLE_TOOLS}
-        assert names == {"read", "bash"}
+        assert names == {"read", "write", "edit", "bash"}
 
     def test_tool_definitions_have_required_fields(self):
         """Each ToolDefinition has name, description, parameters_schema."""
