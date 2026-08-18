@@ -33,9 +33,11 @@ async def run_agent_loop(
     max_iterations: int = 10,
 ):
     messages = list(messages)
-    for _ in range(max_iterations):
+    for i in range(max_iterations):
         reply = await provider.generate_reply(messages, tools)
         messages.append(reply)
+        print(f"[iter {i}] text={reply.content!r} tool_calls="
+              f"{[(t.name, t.arguments) for t in (reply.tool_calls or [])]}")
         if reply.tool_calls:
             for tool_call in reply.tool_calls:
                 tool_result = yield AgentEvent.tool_call(tool_call)

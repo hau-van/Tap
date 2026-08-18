@@ -44,6 +44,7 @@ class ToolCall(BaseModel):
     id: str = Field(default_factory=lambda: _new_id("call"))
     name: str
     arguments: dict[str, Any]
+    thought_signature: Optional[bytes] = None
 
 
 class ToolResult(BaseModel):
