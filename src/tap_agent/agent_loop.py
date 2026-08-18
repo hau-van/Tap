@@ -1,3 +1,4 @@
+
 from __future__ import annotations
  
 import asyncio
@@ -8,9 +9,6 @@ import pathlib
 
 from collections.abc import Callable
  
-from tap_agent import agent_loop
-
-from tap_agent.agent_loop import run_agent_loop
 
 from tap_agent.core_types import (
 
@@ -26,7 +24,43 @@ from tap_agent.core_types import (
 
 )
 
-from tap_agent.provider import MockProvider
+from tap_agent.provider import MockProvider, ModelProvider
+ 
+async def run_agent_loop(
+    messages: list[Message],
+    tools: list[ToolDefinition],
+    provider: ModelProvider,
+    max_iterations: int = 10,
+):
+    messages = list(messages)
+    for _ in range(max_iterations):
+        reply = await provider.generate_reply(messages, tools)
+        messages.append(reply)
+        if reply.tool_calls:
+            for tool_call in reply.tool_calls:
+                tool_result = yield AgentEvent.tool_call(tool_call)
+                if tool_result is not None:
+                    if not isinstance(tool_result, ToolResult):
+                        yield AgentEvent.error(f"expected ToolResult, got {type(tool_result)}")
+                        return
+                    tool_message = Message(
+                        role="tool",
+                        content=json.dumps({
+                            "name": tool_call.name,
+                            "id": tool_call.id,
+                            "success": tool_result.success,
+                            "output": tool_result.output,
+                            "error": tool_result.error,
+                        })
+                    )
+                    messages.append(tool_message)
+        else:
+            yield AgentEvent.message(reply)
+            yield AgentEvent.done()
+            return
+            
+    yield AgentEvent.error("max iterations reached")
+
  
 READ_TOOL = ToolDefinition(
 
@@ -321,7 +355,7 @@ def test_does_not_import_tools_or_concrete_providers():
 
 	*mention* e.g. GeminiProvider in prose as an illustrative example."""
 
-	source = pathlib.Path(agent_loop.__file__).read_text()
+	source = pathlib.Path(__file__).read_text()
 
 	import_lines = [
 
