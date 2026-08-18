@@ -13,6 +13,7 @@ from tap_agent.core_types import ToolCall, ToolDefinition, ToolResult
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 MAX_READ_LINES: int = 2000
+MAX_WRITE_SIZE: int = 5 * 1024 * 1024  # 5 MB limit
 BASH_TIMEOUT_SECONDS: int | float = 30
 
 
@@ -66,7 +67,36 @@ BASH_TOOL_DEFINITION = ToolDefinition(
     },
 )
 
-AVAILABLE_TOOLS: list[ToolDefinition] = [READ_TOOL_DEFINITION, BASH_TOOL_DEFINITION]
+WRITE_TOOL_DEFINITION = ToolDefinition(
+    name="write",
+    description=(
+        "Write content to a file inside the project directory. "
+        "Supports 'overwrite' and 'append' modes. "
+        "Automatically creates parent directories if they do not exist."
+    ),
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the file, relative to the project root.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Content to write to the file.",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["overwrite", "append"],
+                "description": "Write mode. Defaults to 'overwrite'.",
+            },
+        },
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    },
+)
+
+AVAILABLE_TOOLS: list[ToolDefinition] = [READ_TOOL_DEFINITION, WRITE_TOOL_DEFINITION, BASH_TOOL_DEFINITION]
 
 
 class ToolExecutionError(RuntimeError):
@@ -201,6 +231,57 @@ def _read_tool(arguments: dict[str, Any]) -> str:
     return content
 
 
+def _write_tool(arguments: dict[str, Any]) -> str:
+    """Synchronous file writer."""
+    raw_path: str | None = arguments.get("path")
+    content: str | None = arguments.get("content")
+    mode: str = arguments.get("mode", "overwrite")
+
+    if not raw_path:
+        raise ToolExecutionError("Missing required argument: 'path'.")
+    if content is None:
+        raise ToolExecutionError("Missing required argument: 'content'.")
+    
+    if mode not in ("overwrite", "append"):
+        raise ToolExecutionError(f"Invalid mode: '{mode}'. Must be 'overwrite' or 'append'.")
+
+    # Limit maximum write size
+    content_bytes = content.encode("utf-8")
+    actual_bytes = len(content_bytes)
+    if actual_bytes > MAX_WRITE_SIZE:
+        raise ToolExecutionError(f"Content exceeds maximum write size of {MAX_WRITE_SIZE} bytes.")
+
+    resolved = _resolve_within_project(raw_path)
+
+    # Automatically create parent directories
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        raise ToolExecutionError(f"Permission denied: Cannot create parent directories for '{raw_path}'.")
+    except OSError as e:
+        raise ToolExecutionError(f"OS error when creating parent directories: {e}")
+
+    file_mode = "a" if mode == "append" else "w"
+    existed = resolved.exists()
+
+    try:
+        with resolved.open(file_mode, encoding="utf-8") as f:
+            f.write(content)
+    except PermissionError:
+        raise ToolExecutionError(f"Permission denied: Cannot write to '{raw_path}'.")
+    except OSError as e:
+        raise ToolExecutionError(f"OS error when writing to file: {e}")
+
+    if mode == "append":
+        action = "Appended to"
+    elif existed:
+        action = "Overwrote"
+    else:
+        action = "Created new"
+
+    return f"{action} file '{raw_path}' successfully ({actual_bytes} bytes)."
+
+
 async def _bash_tool(arguments: dict[str, Any]) -> str:
     """Async shell executor đa nền tảng.
 
@@ -322,6 +403,7 @@ def _run_bash(arguments: dict[str, Any]) -> Awaitable[str]:
 
 _HANDLERS: dict[str, Any] = {
     "read": _read_tool,
+    "write": _write_tool,
     "bash": _run_bash,
 }
 
