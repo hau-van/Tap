@@ -74,8 +74,12 @@ def _messages_to_contents(messages: list[Message]) -> list[types.Content]:
 				}
 				if tool_call.id:
 					function_call_kwargs["id"] = tool_call.id
-				parts.append(types.Part(function_call=types.FunctionCall(**function_call_kwargs)))
-
+				part_kwargs: dict[str, Any] = {
+            		"function_call": types.FunctionCall(**function_call_kwargs)
+        		}
+				if tool_call.thought_signature:                          
+					part_kwargs["thought_signature"] = tool_call.thought_signature
+				parts.append(types.Part(**part_kwargs))
 		role = "user" if message.role == "user" else "model"
 		contents.append(types.Content(role=role, parts=parts))
 
@@ -102,6 +106,8 @@ def _response_to_message(response: types.GenerateContentResponse) -> Message:
 			}
 			if function_call.id:
 				tool_call_kwargs["id"] = function_call.id
+			if part.thought_signature:                                  
+				tool_call_kwargs["thought_signature"] = part.thought_signature
 			tool_calls.append(ToolCall(**tool_call_kwargs))
 
 	return Message(

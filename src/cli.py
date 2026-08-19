@@ -25,11 +25,15 @@ from tap_agent.coding_session import CodingSession
 from tap_agent.tools import AVAILABLE_TOOLS, execute_tool
 
 async def main():
+    prompt_path = os.path.join(os.path.dirname(__file__), 'tap_agent', 'system_prompt.md')
+    with open(prompt_path, 'r', encoding='utf-8') as f:
+        system_prompt = f.read()
+
     # Khởi tạo Gemini model
     provider = GeminiProvider(
-        model="gemini-2.5-flash", # Hoặc model bạn muốn dùng
+        model="gemini-3.1-flash-lite", # Hoặc model bạn muốn dùng
         api_key=os.environ.get("GEMINI_API_KEY"),
-        system_instruction="Nếu cần đọc nhiều file, hãy gọi tool `read` nhiều lần trong cùng một lượt trả lời thay vì đọc từng file một rồi chờ kết quả."
+        system_instruction=system_prompt
     )
     
     # Gom các thành phần lại vào Harness
