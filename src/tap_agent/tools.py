@@ -14,6 +14,9 @@ from tap_agent.core_types import ToolCall, ToolDefinition, ToolResult
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 MAX_READ_LINES: int = 2000
 MAX_WRITE_SIZE: int = 5 * 1024 * 1024  # 5 MB limit
+MAX_EDIT_SIZE: int = 5 * 1024 * 1024  
+MAX_DUPLICATE_MATCHES_LISTED: int = 10  # Max number of duplicate matches
+UTF8_BOM: str = "\ufeff"
 BASH_TIMEOUT_SECONDS: int | float = 30
 
 
@@ -71,6 +74,8 @@ WRITE_TOOL_DEFINITION = ToolDefinition(
     name="write",
     description=(
         "Write content to a file inside the project directory. "
+        "Use this ONLY to create a NEW file or completely rewrite one from scratch. "
+        "Do NOT use write to change a few lines in an existing file — use 'edit' for that. "
         "Supports 'overwrite' and 'append' modes. "
         "Automatically creates parent directories if they do not exist."
     ),
@@ -96,7 +101,49 @@ WRITE_TOOL_DEFINITION = ToolDefinition(
     },
 )
 
-AVAILABLE_TOOLS: list[ToolDefinition] = [READ_TOOL_DEFINITION, WRITE_TOOL_DEFINITION, BASH_TOOL_DEFINITION]
+EDIT_TOOL_DEFINITION = ToolDefinition(
+    name="edit",
+    description=(
+        "Edit an existing file by replacing a specific target string with a "
+        "replacement string. This is the PREFERRED way to modify an existing file: "
+        "always prefer edit over rewriting the whole file with write. Use write only "
+        "to create a brand-new file. "
+        "The target must match exactly one location in the file, including all "
+        "whitespace and line breaks. If the same target appears in more than one "
+        "place, the tool will reject the edit and list every matching line; when that "
+        "happens, add surrounding context to make the target unique and call edit "
+        "again. To change several different places in one file, call edit once for "
+        "each place."
+    ),
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the file to edit, relative to the project root.",
+            },
+            "target": {
+                "type": "string",
+                "description": (
+                    "Exact existing text to replace, including whitespace and line "
+                    "breaks. Must occur exactly once in the file."
+                ),
+            },
+            "replacement": {
+                "type": "string",
+                "description": "New text that replaces the target string.",
+            },
+        },
+        "required": ["path", "target", "replacement"],
+        "additionalProperties": False,
+    },
+)
+
+AVAILABLE_TOOLS: list[ToolDefinition] = [
+    READ_TOOL_DEFINITION, 
+    WRITE_TOOL_DEFINITION, 
+    EDIT_TOOL_DEFINITION,
+    BASH_TOOL_DEFINITION]
 
 
 class ToolExecutionError(RuntimeError):
@@ -181,6 +228,75 @@ def _get_bash_executable() -> str | None:
         os.path.expanduser(r"~\AppData\Local\Programs\Git\bin\bash.exe"),
     ]
     return next((p for p in possible_paths if os.path.exists(p)), None)
+
+# ---------------------------------------------------------------------------
+# edit tool helpers (line-ending / BOM / xác định vị trí target trùng)
+# ---------------------------------------------------------------------------
+def _detect_line_ending(content: str) -> str:
+    """Đoán line-ending chủ đạo của file: '\\r\\n' hay '\\n'."""
+    crlf_index = content.find("\r\n")
+    lf_index = content.find("\n")
+    if lf_index == -1 or crlf_index == -1:
+        return "\n"
+    return "\r\n" if crlf_index < lf_index else "\n"
+
+
+def _normalize_to_lf(text: str) -> str:
+    """Quy mọi line-ending về '\\n' để việc so khớp không phụ thuộc OS."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _restore_line_endings(text: str, ending: str) -> str:
+    """Khôi phục line-ending gốc sau khi thay thế."""
+    return text.replace("\n", "\r\n") if ending == "\r\n" else text
+
+
+def _strip_bom(content: str) -> tuple[str, str]:
+    """Tách BOM (nếu có) để gắn lại nguyên vẹn sau khi ghi."""
+    return (UTF8_BOM, content[1:]) if content.startswith(UTF8_BOM) else ("", content)
+
+
+def _find_all_offsets(content: str, target: str) -> list[int]:
+    """Trả về offset của mọi lần *target* xuất hiện (non-overlapping)."""
+    offsets: list[int] = []
+    start = 0
+    while True:
+        index = content.find(target, start)
+        if index == -1:
+            return offsets
+        offsets.append(index)
+        start = index + len(target)
+
+
+def _offset_to_location(content: str, offset: int) -> tuple[int, str]:
+    """Đổi offset ký tự thành (số dòng 1-based, nội dung dòng đã trim)."""
+    line_no = content.count("\n", 0, offset) + 1
+    line_start = content.rfind("\n", 0, offset) + 1
+    line_end = content.find("\n", offset)
+    if line_end == -1:
+        line_end = len(content)
+    return line_no, content[line_start:line_end].strip()
+
+
+def _build_duplicate_target_error(
+    content: str, raw_path: str, offsets: list[int]
+) -> str:
+    """Tạo message lỗi liệt kê từng vị trí target trùng để agent tự thu hẹp."""
+    listed_lines: list[str] = []
+    for offset in offsets[:MAX_DUPLICATE_MATCHES_LISTED]:
+        line_no, line_text = _offset_to_location(content, offset)
+        if len(line_text) > 80:
+            line_text = line_text[:77] + "..."
+        listed_lines.append(f"  - line {line_no}: {line_text}")
+    remaining = len(offsets) - MAX_DUPLICATE_MATCHES_LISTED
+    if remaining > 0:
+        listed_lines.append(f"  ... and {remaining} more")
+    locations = "\n".join(listed_lines)
+    return (
+        f"Found {len(offsets)} occurrences of the target in '{raw_path}'; "
+        "it must match exactly one location. Add surrounding context to make "
+        f"the target unique, then retry. Matches found at:\n{locations}"
+    )
 
 # ---------------------------------------------------------------------------
 # Core tool implementations
@@ -281,6 +397,79 @@ def _write_tool(arguments: dict[str, Any]) -> str:
 
     return f"{action} file '{raw_path}' successfully ({actual_bytes} bytes)."
 
+def _edit_tool(arguments: dict[str, Any]) -> str:
+    """Synchronous file editor: replace an exact, unique target string."""
+    raw_path: str | None = arguments.get("path")
+    target: str | None = arguments.get("target")
+    replacement: str | None = arguments.get("replacement")
+
+    if not raw_path:
+        raise ToolExecutionError("Missing required argument: 'path'.")
+    if not target:
+        raise ToolExecutionError("Missing required argument: 'target'.")
+    if replacement is None:
+        raise ToolExecutionError("Missing required argument: 'replacement'.")
+
+    resolved = _resolve_within_project(raw_path)
+
+    if not resolved.exists():
+        raise ToolExecutionError(f"File not found: '{raw_path}'.")
+    if not resolved.is_file():
+        raise ToolExecutionError(f"Path is not a file: '{raw_path}'.")
+
+    # Enforce the size limit BEFORE loading the file into memory.
+    try:
+        file_size = resolved.stat().st_size
+    except OSError as exc:
+        raise ToolExecutionError(f"Cannot stat '{raw_path}': {exc}.")
+    if file_size > MAX_EDIT_SIZE:
+        raise ToolExecutionError(
+            f"File '{raw_path}' is {file_size} bytes, exceeding the maximum "
+            f"edit size of {MAX_EDIT_SIZE} bytes."
+        )
+
+    try:
+        with resolved.open("r", encoding="utf-8", newline="") as handle:
+            raw_content = handle.read()
+    except UnicodeDecodeError:
+        raise ToolExecutionError(
+            f"Cannot edit '{raw_path}': binary file detected. Only UTF-8 text files are supported."
+        )
+    except PermissionError:
+        raise ToolExecutionError(f"Permission denied: Cannot read '{raw_path}'.")
+    except OSError as exc:
+        raise ToolExecutionError(f"OS error when reading '{raw_path}': {exc}.")
+
+    bom, content = _strip_bom(raw_content)
+    original_ending = _detect_line_ending(content)
+    normalized = _normalize_to_lf(content)
+    norm_target = _normalize_to_lf(target)
+    norm_replacement = _normalize_to_lf(replacement)
+
+    offsets = _find_all_offsets(normalized, norm_target)
+    if len(offsets) == 0:
+        raise ToolExecutionError(
+            f"Target not found in '{raw_path}'. The 'target' must match exactly, "
+            "including all whitespace and line breaks."
+        )
+    if len(offsets) > 1:
+        raise ToolExecutionError(
+            _build_duplicate_target_error(normalized, raw_path, offsets)
+        )
+
+    new_normalized = normalized.replace(norm_target, norm_replacement, 1)
+    final_content = bom + _restore_line_endings(new_normalized, original_ending)
+
+    try:
+        with resolved.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(final_content)
+    except PermissionError:
+        raise ToolExecutionError(f"Permission denied: Cannot write to '{raw_path}'.")
+    except OSError as exc:
+        raise ToolExecutionError(f"OS error when writing to '{raw_path}': {exc}.")
+
+    line_no, _ = _offset_to_location(normalized, offsets[0])
+    return f"Edited file '{raw_path}' successfully (replaced target at line {line_no})."
 
 async def _bash_tool(arguments: dict[str, Any]) -> str:
     """Async shell executor đa nền tảng.
@@ -404,6 +593,7 @@ def _run_bash(arguments: dict[str, Any]) -> Awaitable[str]:
 _HANDLERS: dict[str, Any] = {
     "read": _read_tool,
     "write": _write_tool,
+    "edit": _edit_tool,
     "bash": _run_bash,
 }
 
